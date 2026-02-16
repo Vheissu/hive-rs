@@ -402,75 +402,19 @@ async fn run_authenticated_checks(
     }
 
     if auth.broadcast_self_transfer {
-        println!("broadcast_mode=async (condenser_api.broadcast_transaction)");
-        let raw_broadcast_result: serde_json::Value = client
-            .call("condenser_api", "broadcast_transaction", json!([signed]))
+        let confirmation = client
+            .broadcast
+            .send(signed)
             .await
-            .map_err(|err| with_step("client.call(condenser_api.broadcast_transaction)", err))?;
-        println!("broadcast_async_result={raw_broadcast_result}");
-
-        let mut status = "unknown".to_string();
-        let mut used_condenser_fallback = false;
-        for _ in 0..15 {
-            if !used_condenser_fallback {
-                match client.transaction.find_transaction(&tx_id).await {
-                    Ok(found) => {
-                        status = found.status;
-                        if status != "unknown" {
-                            break;
-                        }
-                    }
-                    Err(HiveError::Rpc { message, .. })
-                        if message.contains("Could not find method find_transaction") =>
-                    {
-                        used_condenser_fallback = true;
-                        println!(
-                            "transaction_status_source=condenser_api.get_transaction (fallback)"
-                        );
-                    }
-                    Err(err) => {
-                        println!("transaction_status_poll_error={err}");
-                    }
-                }
-            }
-
-            if used_condenser_fallback {
-                match client
-                    .call::<serde_json::Value>(
-                        "condenser_api",
-                        "get_transaction",
-                        json!([tx_id.clone()]),
-                    )
-                    .await
-                {
-                    Ok(found) => {
-                        let block_num = found
-                            .get("block_num")
-                            .and_then(serde_json::Value::as_u64)
-                            .unwrap_or_default();
-                        if block_num > 0 {
-                            status = "found_in_block".to_string();
-                            break;
-                        }
-                    }
-                    Err(HiveError::Rpc { message, .. })
-                        if message.to_ascii_lowercase().contains("unknown transaction") =>
-                    {
-                        // Still propagating in mempool.
-                    }
-                    Err(err) => {
-                        println!("transaction_status_poll_error={err}");
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-
-        println!("broadcast_self_transfer_tx_id={tx_id}");
-        println!("broadcast_self_transfer_status={status}");
+            .map_err(|err| with_step("broadcast.send", err))?;
+        println!("broadcast_self_transfer_tx_id={}", confirmation.id);
+        println!(
+            "broadcast_self_transfer_block_num={} trx_num={}",
+            confirmation.block_num, confirmation.trx_num
+        );
         ensure(
-            status != "unknown",
-            "broadcast submitted but transaction status stayed unknown",
+            confirmation.id == tx_id,
+            "broadcast confirmation id did not match generated tx id",
         )?;
     } else {
         println!("broadcast_self_transfer=skipped (set HIVE_BROADCAST_SELF_TRANSFER=1 to enable)");
