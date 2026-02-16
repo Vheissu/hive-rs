@@ -1,11 +1,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::client::ClientInner;
 use crate::crypto::{sign_transaction, PrivateKey};
 use crate::error::{HiveError, Result};
+use crate::serialization::generate_trx_id;
 use crate::serialization::types::{format_hive_time, parse_hive_time};
 use crate::types::{
     AccountCreateOperation, AccountCreateWithDelegationOperation, AccountUpdate2Operation,
@@ -89,13 +90,21 @@ impl BroadcastApi {
     }
 
     pub async fn send(&self, transaction: SignedTransaction) -> Result<TransactionConfirmation> {
-        self.client
+        match self
+            .client
             .call(
                 "condenser_api",
                 "broadcast_transaction_synchronous",
-                json!([transaction]),
+                json!([transaction.clone()]),
             )
             .await
+        {
+            Ok(confirmation) => Ok(confirmation),
+            Err(err) if should_fallback_to_async_broadcast(&err) => {
+                self.send_async_with_confirmation(transaction).await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub async fn send_operations(
@@ -557,6 +566,108 @@ impl BroadcastApi {
         self.send_operations(vec![Operation::RecurrentTransfer(params)], key)
             .await
     }
+
+    async fn send_async_with_confirmation(
+        &self,
+        transaction: SignedTransaction,
+    ) -> Result<TransactionConfirmation> {
+        let tx_id = signed_transaction_id(&transaction)?;
+
+        let _: Value = self
+            .client
+            .call(
+                "condenser_api",
+                "broadcast_transaction",
+                json!([transaction]),
+            )
+            .await?;
+
+        for _ in 0..15 {
+            match self
+                .client
+                .call::<Value>("condenser_api", "get_transaction", json!([tx_id.clone()]))
+                .await
+            {
+                Ok(found) => return Ok(confirmation_from_condenser_transaction(&tx_id, &found)),
+                Err(err) if is_transient_lookup_error(&err) => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        // The async broadcast call succeeded, but the tx was not yet visible in the lookup window.
+        Ok(TransactionConfirmation {
+            id: tx_id,
+            block_num: 0,
+            trx_num: 0,
+            expired: false,
+        })
+    }
+}
+
+fn should_fallback_to_async_broadcast(error: &HiveError) -> bool {
+    match error {
+        HiveError::Transport(_) | HiveError::Timeout | HiveError::AllNodesFailed => true,
+        HiveError::Serialization(_) => true,
+        HiveError::Rpc { message, .. } => {
+            let message = message.to_ascii_lowercase();
+            message.contains("could not find method") || message.contains("could not find api")
+        }
+        _ => false,
+    }
+}
+
+fn signed_transaction_id(transaction: &SignedTransaction) -> Result<String> {
+    let unsigned = Transaction {
+        ref_block_num: transaction.ref_block_num,
+        ref_block_prefix: transaction.ref_block_prefix,
+        expiration: transaction.expiration.clone(),
+        operations: transaction.operations.clone(),
+        extensions: transaction.extensions.clone(),
+    };
+
+    generate_trx_id(&unsigned)
+}
+
+fn confirmation_from_condenser_transaction(
+    tx_id: &str,
+    transaction: &Value,
+) -> TransactionConfirmation {
+    let block_num = transaction
+        .get("block_num")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0);
+    let trx_num = transaction
+        .get("transaction_num")
+        .or_else(|| transaction.get("trx_num"))
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0);
+
+    TransactionConfirmation {
+        id: tx_id.to_string(),
+        block_num,
+        trx_num,
+        expired: false,
+    }
+}
+
+fn is_transient_lookup_error(error: &HiveError) -> bool {
+    match error {
+        HiveError::Transport(_) | HiveError::Timeout | HiveError::AllNodesFailed => true,
+        HiveError::Rpc { message, .. } => {
+            let message = message.to_ascii_lowercase();
+            message.contains("unknown transaction")
+                || message.contains("unable to find transaction")
+                || message.contains("missing transaction")
+                || message.contains("could not find method")
+                || message.contains("could not find api")
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -572,7 +683,7 @@ mod tests {
     use crate::client::{ClientInner, ClientOptions};
     use crate::crypto::PrivateKey;
     use crate::transport::{BackoffStrategy, FailoverTransport};
-    use crate::types::{Asset, Operation, TransferOperation};
+    use crate::types::{Asset, Operation, SignedTransaction, TransferOperation};
 
     #[tokio::test]
     async fn send_operations_builds_signs_and_broadcasts() {
@@ -645,5 +756,74 @@ mod tests {
 
         assert_eq!(result.block_num, 42);
         assert!(!result.expired);
+    }
+
+    #[tokio::test]
+    async fn send_falls_back_to_async_broadcast_when_sync_endpoint_fails() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({
+                "method": "call",
+                "params": ["condenser_api", "broadcast_transaction_synchronous"]
+            })))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({
+                "method": "call",
+                "params": ["condenser_api", "broadcast_transaction"]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 0,
+                "jsonrpc": "2.0",
+                "result": {}
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({
+                "method": "call",
+                "params": ["condenser_api", "get_transaction"]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 0,
+                "jsonrpc": "2.0",
+                "result": {
+                    "block_num": 42,
+                    "transaction_num": 7
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let transport = Arc::new(
+            FailoverTransport::new(
+                &[server.uri()],
+                Duration::from_secs(2),
+                1,
+                BackoffStrategy::default(),
+            )
+            .expect("transport should initialize"),
+        );
+        let inner = Arc::new(ClientInner::new(transport, ClientOptions::default()));
+        let broadcast = BroadcastApi::new(inner);
+
+        let tx = SignedTransaction {
+            ref_block_num: 1,
+            ref_block_prefix: 2,
+            expiration: "2024-01-01T00:00:00".to_string(),
+            operations: vec![],
+            extensions: vec![],
+            signatures: vec!["1f00".to_string()],
+        };
+
+        let result = broadcast.send(tx).await.expect("fallback should succeed");
+        assert_eq!(result.block_num, 42);
+        assert_eq!(result.trx_num, 7);
+        assert!(!result.id.is_empty());
     }
 }

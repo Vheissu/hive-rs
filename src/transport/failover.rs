@@ -101,6 +101,10 @@ impl FailoverTransport {
                     })
                 }
                 Err(err) => {
+                    if !Self::is_retryable_transport_error(&err) {
+                        return Err(err);
+                    }
+
                     let _ = err;
                     had_transport_error = true;
 
@@ -124,6 +128,13 @@ impl FailoverTransport {
                 "request failed without transport error".to_string(),
             ))
         }
+    }
+
+    fn is_retryable_transport_error(error: &HiveError) -> bool {
+        matches!(
+            error,
+            HiveError::Transport(_) | HiveError::Timeout | HiveError::AllNodesFailed
+        )
     }
 
     fn backoff_delay(&self, tries: u32) -> Duration {
@@ -281,6 +292,49 @@ mod tests {
         match err {
             HiveError::AllNodesFailed => {}
             other => panic!("expected HiveError::AllNodesFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn does_not_failover_on_serialization_error() {
+        let first = MockServer::start().await;
+        let second = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 0,
+                "jsonrpc": "2.0",
+                "result": { "pong": "yes" }
+            })))
+            .mount(&first)
+            .await;
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 0,
+                "jsonrpc": "2.0",
+                "result": { "pong": true }
+            })))
+            .expect(0)
+            .mount(&second)
+            .await;
+
+        let transport = FailoverTransport::new(
+            &[first.uri(), second.uri()],
+            Duration::from_secs(2),
+            1,
+            BackoffStrategy::default(),
+        )
+        .expect("transport should initialize");
+
+        let err = transport
+            .call::<Ping>("condenser_api", "get_config", json!([]))
+            .await
+            .expect_err("serialization error should be returned directly");
+
+        match err {
+            HiveError::Serialization(_) => {}
+            other => panic!("expected HiveError::Serialization, got {other:?}"),
         }
     }
 }

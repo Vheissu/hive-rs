@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::client::ClientInner;
-use crate::error::Result;
+use crate::error::{HiveError, Result};
 
 #[derive(Debug, Clone)]
 pub struct AccountByKeyApi {
@@ -16,14 +16,35 @@ impl AccountByKeyApi {
     }
 
     pub async fn get_key_references(&self, keys: &[String]) -> Result<Vec<Vec<String>>> {
-        self.client
+        match self
+            .client
             .call(
                 "account_by_key_api",
                 "get_key_references",
                 json!([{ "keys": keys }]),
             )
             .await
+        {
+            Ok(result) => Ok(result),
+            Err(err) if should_fallback_to_condenser(&err) => {
+                self.client
+                    .call("condenser_api", "get_key_references", json!([keys]))
+                    .await
+            }
+            Err(err) => Err(err),
+        }
     }
+}
+
+fn should_fallback_to_condenser(error: &HiveError) -> bool {
+    let HiveError::Rpc { message, .. } = error else {
+        return false;
+    };
+
+    let message = message.to_ascii_lowercase();
+    message.contains("could not find method")
+        || message.contains("could not find api")
+        || message.contains("invalid cast from object_type to array")
 }
 
 #[cfg(test)]
@@ -71,6 +92,58 @@ mod tests {
             .get_key_references(&["STMabc".to_string()])
             .await
             .expect("rpc should succeed");
+        assert_eq!(result, vec![vec!["alice".to_string()]]);
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_condenser_api_when_account_by_key_format_is_rejected() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({
+                "method": "call",
+                "params": ["account_by_key_api", "get_key_references", [{"keys": ["STMabc"]}]]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 0,
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32000,
+                    "message": "Bad Cast:Invalid cast from object_type to Array"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({
+                "method": "call",
+                "params": ["condenser_api", "get_key_references", [["STMabc"]]]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 0,
+                "jsonrpc": "2.0",
+                "result": [["alice"]]
+            })))
+            .mount(&server)
+            .await;
+
+        let transport = Arc::new(
+            FailoverTransport::new(
+                &[server.uri()],
+                Duration::from_secs(2),
+                1,
+                BackoffStrategy::default(),
+            )
+            .expect("transport should initialize"),
+        );
+        let inner = Arc::new(ClientInner::new(transport, ClientOptions::default()));
+        let api = AccountByKeyApi::new(inner);
+
+        let result = api
+            .get_key_references(&["STMabc".to_string()])
+            .await
+            .expect("fallback rpc should succeed");
         assert_eq!(result, vec![vec!["alice".to_string()]]);
     }
 }
