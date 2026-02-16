@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use rand::Rng;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -34,7 +35,6 @@ struct FailoverState {
 pub struct FailoverTransport {
     transports: Vec<HttpTransport>,
     failover_threshold: u32,
-    #[allow(dead_code)]
     backoff: BackoffStrategy,
     state: Arc<Mutex<FailoverState>>,
 }
@@ -74,7 +74,7 @@ impl FailoverTransport {
         }
 
         let start_index = self.state.lock().await.current_index;
-        let mut last_error: Option<HiveError> = None;
+        let mut had_transport_error = false;
 
         for offset in 0..self.transports.len() {
             let index = (start_index + offset) % self.transports.len();
@@ -101,18 +101,52 @@ impl FailoverTransport {
                     })
                 }
                 Err(err) => {
-                    last_error = Some(err);
+                    let _ = err;
+                    had_transport_error = true;
 
                     let mut state = self.state.lock().await;
                     state.failures[index] = state.failures[index].saturating_add(1);
+                    let node_failures = state.failures[index];
                     if state.failures[index] >= self.failover_threshold {
                         state.current_index = (index + 1) % self.transports.len();
                     }
+                    let delay = self.backoff_delay(node_failures);
+                    drop(state);
+                    tokio::time::sleep(delay).await;
                 }
             }
         }
 
-        Err(last_error.unwrap_or(HiveError::AllNodesFailed))
+        if had_transport_error {
+            Err(HiveError::AllNodesFailed)
+        } else {
+            Err(HiveError::Other(
+                "request failed without transport error".to_string(),
+            ))
+        }
+    }
+
+    fn backoff_delay(&self, tries: u32) -> Duration {
+        let tries = tries.max(1);
+        let millis = match self.backoff {
+            BackoffStrategy::Exponential { base_ms, max_ms } => {
+                let step = (base_ms / 10).max(1);
+                let scaled_tries = tries as u64 * step;
+                scaled_tries.saturating_mul(scaled_tries).min(max_ms)
+            }
+            BackoffStrategy::Linear { step_ms, max_ms } => {
+                step_ms.saturating_mul(tries as u64).min(max_ms)
+            }
+            BackoffStrategy::Fixed { ms } => ms,
+        };
+
+        // Small positive jitter to avoid synchronized retries.
+        let jitter = if millis > 0 {
+            rand::thread_rng().gen_range(0..=millis / 10)
+        } else {
+            0
+        };
+        Duration::from_millis(millis.saturating_add(jitter))
     }
 }
 
@@ -214,6 +248,39 @@ mod tests {
                 assert_eq!(message, "bad request");
             }
             other => panic!("expected HiveError::Rpc, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn returns_all_nodes_failed_when_every_node_is_unhealthy() {
+        let first = MockServer::start().await;
+        let second = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&first)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&second)
+            .await;
+
+        let transport = FailoverTransport::new(
+            &[first.uri(), second.uri()],
+            Duration::from_secs(2),
+            1,
+            BackoffStrategy::default(),
+        )
+        .expect("transport should initialize");
+
+        let err = transport
+            .call::<Ping>("condenser_api", "get_config", json!([]))
+            .await
+            .expect_err("all nodes should fail");
+
+        match err {
+            HiveError::AllNodesFailed => {}
+            other => panic!("expected HiveError::AllNodesFailed, got {other:?}"),
         }
     }
 }

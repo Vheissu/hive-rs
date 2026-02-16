@@ -4,4 +4,5 @@ pub mod signature;
 pub mod utils;
 
 pub use keys::*;
+pub use memo::*;
 pub use signature::*;

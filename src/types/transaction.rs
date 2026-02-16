@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::Operation;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Transaction {
     pub ref_block_num: u16,
     pub ref_block_prefix: u32,
@@ -13,7 +13,7 @@ pub struct Transaction {
     pub extensions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SignedTransaction {
     pub ref_block_num: u16,
     pub ref_block_prefix: u32,

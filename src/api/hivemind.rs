@@ -68,3 +68,53 @@ impl HivemindApi {
         self.call("get_post", json!([author, permlink])).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use serde_json::json;
+    use wiremock::matchers::{body_partial_json, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::api::HivemindApi;
+    use crate::client::{ClientInner, ClientOptions};
+    use crate::transport::{BackoffStrategy, FailoverTransport};
+    use crate::types::PostsQuery;
+
+    #[tokio::test]
+    async fn get_ranked_posts_uses_bridge_namespace() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({
+                "method": "call",
+                "params": ["bridge", "get_ranked_posts"]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 0,
+                "jsonrpc": "2.0",
+                "result": []
+            })))
+            .mount(&server)
+            .await;
+
+        let transport = Arc::new(
+            FailoverTransport::new(
+                &[server.uri()],
+                Duration::from_secs(2),
+                1,
+                BackoffStrategy::default(),
+            )
+            .expect("transport should initialize"),
+        );
+        let inner = Arc::new(ClientInner::new(transport, ClientOptions::default()));
+        let api = HivemindApi::new(inner);
+
+        let posts = api
+            .get_ranked_posts(&PostsQuery::default())
+            .await
+            .expect("rpc should succeed");
+        assert!(posts.is_empty());
+    }
+}

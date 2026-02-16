@@ -355,11 +355,99 @@ impl DatabaseApi {
             .await
     }
 
+    pub async fn get_operations(&self, block_num: u32) -> Result<Vec<AppliedOperation>> {
+        self.get_ops_in_block(block_num, false).await
+    }
+
     pub async fn get_block(&self, block_num: u32) -> Result<Option<SignedBlock>> {
         self.call("get_block", json!([block_num])).await
     }
 
     pub async fn get_block_header(&self, block_num: u32) -> Result<Option<BlockHeader>> {
         self.call("get_block_header", json!([block_num])).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use serde_json::json;
+    use wiremock::matchers::{body_partial_json, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::api::DatabaseApi;
+    use crate::client::{ClientInner, ClientOptions};
+    use crate::transport::{BackoffStrategy, FailoverTransport};
+    use crate::types::{DiscussionQuery, DiscussionQueryCategory};
+
+    #[tokio::test]
+    async fn get_accounts_calls_condenser_api() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({
+                "method": "call",
+                "params": ["condenser_api", "get_accounts", [["alice"]]]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 0,
+                "jsonrpc": "2.0",
+                "result": [{"name": "alice"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let transport = Arc::new(
+            FailoverTransport::new(
+                &[server.uri()],
+                Duration::from_secs(2),
+                1,
+                BackoffStrategy::default(),
+            )
+            .expect("transport should initialize"),
+        );
+        let inner = Arc::new(ClientInner::new(transport, ClientOptions::default()));
+        let api = DatabaseApi::new(inner);
+
+        let accounts = api.get_accounts(&["alice"]).await.expect("rpc should pass");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].name, "alice");
+    }
+
+    #[tokio::test]
+    async fn get_discussions_maps_category_to_method_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({
+                "method": "call",
+                "params": ["condenser_api", "get_discussions_by_created"]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 0,
+                "jsonrpc": "2.0",
+                "result": []
+            })))
+            .mount(&server)
+            .await;
+
+        let transport = Arc::new(
+            FailoverTransport::new(
+                &[server.uri()],
+                Duration::from_secs(2),
+                1,
+                BackoffStrategy::default(),
+            )
+            .expect("transport should initialize"),
+        );
+        let inner = Arc::new(ClientInner::new(transport, ClientOptions::default()));
+        let api = DatabaseApi::new(inner);
+
+        let query = DiscussionQuery::default();
+        let posts = api
+            .get_discussions(DiscussionQueryCategory::Created, &query)
+            .await
+            .expect("rpc should pass");
+        assert!(posts.is_empty());
     }
 }
