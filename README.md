@@ -1,5 +1,9 @@
 # hive-rs
 
+[![crates.io](https://img.shields.io/crates/v/hive-rs.svg)](https://crates.io/crates/hive-rs)
+[![docs.rs](https://img.shields.io/docsrs/hive-rs)](https://docs.rs/hive-rs)
+[![license](https://img.shields.io/crates/l/hive-rs.svg)](LICENSE)
+
 A Rust client library for the Hive blockchain with API coverage modeled after `dhive`.
 
 This crate gives you:
@@ -24,6 +28,12 @@ This crate gives you:
 - [Development](#development)
 
 ## Installation
+
+From crates.io:
+
+```bash
+cargo add hive-rs
+```
 
 ```toml
 [dependencies]
