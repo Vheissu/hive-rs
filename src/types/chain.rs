@@ -18,6 +18,39 @@ pub struct DynamicGlobalProperties {
     pub total_vesting_fund_hive: Option<Asset>,
     #[serde(default)]
     pub total_vesting_shares: Option<Asset>,
+
+    // Supply
+    #[serde(default)]
+    pub current_supply: Option<Asset>,
+    #[serde(default)]
+    pub current_hbd_supply: Option<Asset>,
+    #[serde(default)]
+    pub virtual_supply: Option<Asset>,
+    #[serde(default)]
+    pub total_reward_fund_hive: Option<Asset>,
+
+    // Pending rewards
+    #[serde(default)]
+    pub pending_rewarded_vesting_shares: Option<Asset>,
+    #[serde(default)]
+    pub pending_rewarded_vesting_hive: Option<Asset>,
+
+    // Rates & limits
+    #[serde(default)]
+    pub hbd_interest_rate: Option<u32>,
+    #[serde(default)]
+    pub hbd_print_rate: Option<u32>,
+    #[serde(default)]
+    pub maximum_block_size: Option<u32>,
+
+    // Slots & participation
+    #[serde(default)]
+    pub current_aslot: Option<u64>,
+    #[serde(default)]
+    pub participation_count: Option<u32>,
+    #[serde(default)]
+    pub last_confirmed_block_num: Option<u32>,
+
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

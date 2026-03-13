@@ -67,6 +67,10 @@ impl HivemindApi {
     pub async fn get_post(&self, author: &str, permlink: &str) -> Result<Discussion> {
         self.call("get_post", json!([author, permlink])).await
     }
+
+    pub async fn list_all_subscriptions(&self, account: &str) -> Result<Vec<Value>> {
+        self.call("list_all_subscriptions", json!([account])).await
+    }
 }
 
 #[cfg(test)]

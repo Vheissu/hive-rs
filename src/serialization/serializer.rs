@@ -88,6 +88,9 @@ impl HiveSerialize for Operation {
             Operation::UpdateProposal(op) => serialize_update_proposal(buf, op),
             Operation::CollateralizedConvert(op) => serialize_collateralized_convert(buf, op),
             Operation::RecurrentTransfer(op) => serialize_recurrent_transfer(buf, op),
+            Operation::Virtual { op_type, .. } => Err(HiveError::Serialization(format!(
+                "virtual operation '{op_type}' cannot be serialized for broadcast"
+            ))),
         }
     }
 }

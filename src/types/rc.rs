@@ -110,6 +110,43 @@ where
         .map_err(D::Error::custom)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ManaResult {
+    pub current: i64,
+    pub max: i64,
+    pub percentage: f64,
+}
+
+const MANA_REGEN_SECONDS: i64 = 432_000; // 5 days
+
+pub fn compute_mana(current_mana: i64, last_update_time: u64, max_mana: i64) -> ManaResult {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let elapsed = now - last_update_time as i64;
+    let elapsed = elapsed.max(0);
+
+    let regenerated = if max_mana > 0 && MANA_REGEN_SECONDS > 0 {
+        (elapsed as i128 * max_mana as i128 / MANA_REGEN_SECONDS as i128) as i64
+    } else {
+        0
+    };
+    let current = (current_mana.saturating_add(regenerated)).min(max_mana);
+
+    let percentage = if max_mana > 0 {
+        (current as f64 / max_mana as f64 * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+
+    ManaResult {
+        current,
+        max: max_mana,
+        percentage,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Manabar {
     #[serde(default, deserialize_with = "deserialize_i64")]
@@ -233,7 +270,7 @@ impl fmt::Display for RcStats {
 mod tests {
     use serde_json::json;
 
-    use crate::types::{RCAccount, RCParams, RCPool, RcStats};
+    use crate::types::{compute_mana, RCAccount, RCParams, RCPool, RcStats};
 
     #[test]
     fn rc_account_parses_mixed_numeric_encodings() {
@@ -336,5 +373,30 @@ mod tests {
         .expect("stats should parse");
         assert_eq!(stats.regen, 2_298_172_681_338);
         assert_eq!(stats.share[1], 10_000);
+    }
+
+    #[test]
+    fn compute_mana_full_at_max() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // If last update was long ago and mana was already at max, should be at max
+        let result = compute_mana(1_000_000, now - 500_000, 1_000_000);
+        assert_eq!(result.current, 1_000_000);
+        assert_eq!(result.max, 1_000_000);
+        assert!((result.percentage - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn compute_mana_regenerates() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Start at 0 mana, half regen time elapsed (216000 seconds)
+        let result = compute_mana(0, now - 216_000, 1_000_000);
+        // Should be ~50%
+        assert!(result.percentage > 49.0 && result.percentage < 51.0);
     }
 }

@@ -10,8 +10,8 @@ use crate::error::{HiveError, Result};
 use crate::serialization::serialize_transaction;
 use crate::serialization::types::parse_hive_time;
 use crate::types::{
-    Authority, DynamicGlobalProperties, Operation, RCAccount, RCParams, RCPool, RCResourceParam,
-    RcStats, Transaction,
+    Authority, DynamicGlobalProperties, ExtendedAccount, ManaResult, Operation, RCAccount, RCParams,
+    RCPool, RCResourceParam, RcStats, Transaction,
 };
 
 const RESOURCE_HISTORY_BYTES: &str = "resource_history_bytes";
@@ -114,6 +114,71 @@ impl RcApi {
     async fn get_rc_stats(&self) -> Result<RcStats> {
         let response: RcStatsResponse = self.call("get_rc_stats", json!({})).await?;
         Ok(response.rc_stats)
+    }
+
+    pub fn calculate_rc_mana(rc_account: &RCAccount) -> Result<ManaResult> {
+        let manabar = rc_account
+            .rc_manabar
+            .as_ref()
+            .ok_or_else(|| HiveError::Other("rc_manabar missing from RCAccount".to_string()))?;
+        let max_rc = rc_account
+            .max_rc
+            .ok_or_else(|| HiveError::Other("max_rc missing from RCAccount".to_string()))?;
+        Ok(crate::types::compute_mana(
+            manabar.current_mana,
+            manabar.last_update_time,
+            max_rc,
+        ))
+    }
+
+    pub fn calculate_vp_mana(account: &ExtendedAccount) -> Result<ManaResult> {
+        let manabar = account
+            .voting_manabar
+            .as_ref()
+            .ok_or_else(|| {
+                HiveError::Other("voting_manabar missing from account".to_string())
+            })?;
+        let vesting = account
+            .vesting_shares
+            .as_ref()
+            .ok_or_else(|| {
+                HiveError::Other("vesting_shares missing from account".to_string())
+            })?;
+        let delegated = account
+            .delegated_vesting_shares
+            .as_ref()
+            .map(|a| a.amount)
+            .unwrap_or(0);
+        let received = account
+            .received_vesting_shares
+            .as_ref()
+            .map(|a| a.amount)
+            .unwrap_or(0);
+        let max_mana = vesting.amount - delegated + received;
+        Ok(crate::types::compute_mana(
+            manabar.current_mana,
+            manabar.last_update_time,
+            max_mana,
+        ))
+    }
+
+    pub async fn get_rc_mana(&self, username: &str) -> Result<ManaResult> {
+        let accounts = self.find_rc_accounts(&[username]).await?;
+        let rc_account = accounts
+            .first()
+            .ok_or_else(|| HiveError::Other(format!("RC account '{username}' not found")))?;
+        Self::calculate_rc_mana(rc_account)
+    }
+
+    pub async fn get_vp_mana(&self, username: &str) -> Result<ManaResult> {
+        let accounts: Vec<ExtendedAccount> = self
+            .client
+            .call("condenser_api", "get_accounts", serde_json::json!([[username]]))
+            .await?;
+        let account = accounts
+            .first()
+            .ok_or_else(|| HiveError::Other(format!("account '{username}' not found")))?;
+        Self::calculate_vp_mana(account)
     }
 
     async fn get_fallback_regen(&self) -> Result<i64> {
@@ -445,7 +510,8 @@ fn estimate_resource_usage(operations: &[Operation], params: &RCParams) -> Resul
             | Operation::Pow2(_)
             | Operation::ResetAccount(_)
             | Operation::SetResetAccount(_)
-            | Operation::ReportOverProduction(_) => {}
+            | Operation::ReportOverProduction(_)
+            | Operation::Virtual { .. } => {}
         }
     }
 

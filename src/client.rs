@@ -113,6 +113,21 @@ impl Client {
         )
     }
 
+    pub fn testnet(nodes: Vec<&str>) -> Self {
+        Self::new(
+            nodes,
+            ClientOptions {
+                chain_id: ChainId::testnet(),
+                address_prefix: "TST".to_string(),
+                ..ClientOptions::default()
+            },
+        )
+    }
+
+    pub fn testnet_default() -> Self {
+        Self::testnet(vec!["https://testnet.openhive.network"])
+    }
+
     pub fn options(&self) -> &ClientOptions {
         self.inner.options()
     }

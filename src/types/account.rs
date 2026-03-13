@@ -4,7 +4,7 @@ use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::types::Operation;
+use crate::types::{Asset, Authority, Manabar, Operation};
 
 fn deserialize_stringified<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
 where
@@ -44,6 +44,79 @@ pub struct ExtendedAccount {
     pub reputation: Option<String>,
     #[serde(default)]
     pub memo_key: Option<String>,
+
+    // Identity
+    #[serde(default)]
+    pub id: Option<u64>,
+    #[serde(default)]
+    pub created: Option<String>,
+    #[serde(default)]
+    pub recovery_account: Option<String>,
+    #[serde(default)]
+    pub proxy: Option<String>,
+
+    // Balances
+    #[serde(default)]
+    pub balance: Option<Asset>,
+    #[serde(default)]
+    pub hbd_balance: Option<Asset>,
+    #[serde(default)]
+    pub savings_balance: Option<Asset>,
+    #[serde(default)]
+    pub savings_hbd_balance: Option<Asset>,
+
+    // Vesting
+    #[serde(default)]
+    pub vesting_shares: Option<Asset>,
+    #[serde(default)]
+    pub delegated_vesting_shares: Option<Asset>,
+    #[serde(default)]
+    pub received_vesting_shares: Option<Asset>,
+    #[serde(default)]
+    pub vesting_withdraw_rate: Option<Asset>,
+    #[serde(default, deserialize_with = "deserialize_opt_stringified")]
+    pub to_withdraw: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_opt_stringified")]
+    pub withdrawn: Option<String>,
+
+    // Mana
+    #[serde(default)]
+    pub voting_manabar: Option<Manabar>,
+    #[serde(default)]
+    pub downvote_manabar: Option<Manabar>,
+
+    // Rewards
+    #[serde(default)]
+    pub reward_hive_balance: Option<Asset>,
+    #[serde(default)]
+    pub reward_hbd_balance: Option<Asset>,
+    #[serde(default)]
+    pub reward_vesting_balance: Option<Asset>,
+    #[serde(default)]
+    pub reward_vesting_hive: Option<Asset>,
+
+    // Authorities
+    #[serde(default)]
+    pub owner: Option<Authority>,
+    #[serde(default)]
+    pub active: Option<Authority>,
+    #[serde(default)]
+    pub posting: Option<Authority>,
+
+    // Metadata
+    #[serde(default)]
+    pub json_metadata: Option<String>,
+    #[serde(default)]
+    pub posting_json_metadata: Option<String>,
+
+    // Social
+    #[serde(default)]
+    pub post_count: Option<u64>,
+    #[serde(default)]
+    pub witnesses_voted_for: Option<u32>,
+    #[serde(default)]
+    pub last_vote_time: Option<String>,
+
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

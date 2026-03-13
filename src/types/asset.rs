@@ -1,4 +1,6 @@
+use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
+use std::ops::{Add, AddAssign, Div, Mul, Sub, SubAssign};
 use std::str::FromStr;
 
 use serde::de::Error as _;
@@ -98,6 +100,21 @@ impl Asset {
         (self.amount, self.precision, symbol)
     }
 
+    pub fn as_f64(&self) -> f64 {
+        let scale = 10_i64.pow(self.precision as u32);
+        self.amount as f64 / scale as f64
+    }
+
+    pub fn min(a: &Self, b: &Self) -> Self {
+        assert_same_symbol(a, b);
+        if a.amount <= b.amount { a.clone() } else { b.clone() }
+    }
+
+    pub fn max(a: &Self, b: &Self) -> Self {
+        assert_same_symbol(a, b);
+        if a.amount >= b.amount { a.clone() } else { b.clone() }
+    }
+
     fn from_float(amount: f64, precision: u8, symbol: AssetSymbol) -> Self {
         let scale = 10_i64.pow(precision as u32);
         let amount = (amount * scale as f64).round() as i64;
@@ -106,6 +123,90 @@ impl Asset {
             precision,
             symbol,
         }
+    }
+}
+
+fn assert_same_symbol(a: &Asset, b: &Asset) {
+    assert!(
+        a.symbol == b.symbol && a.precision == b.precision,
+        "cannot operate on assets with different symbols: {} vs {}",
+        a.symbol.as_str(),
+        b.symbol.as_str()
+    );
+}
+
+impl PartialOrd for Asset {
+    #[allow(clippy::non_canonical_partial_ord_impl)]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self.symbol != other.symbol || self.precision != other.precision {
+            return None;
+        }
+        Some(self.amount.cmp(&other.amount))
+    }
+}
+
+impl Ord for Asset {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other)
+            .expect("cannot compare assets with different symbols")
+    }
+}
+
+impl Add for Asset {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        assert_same_symbol(&self, &rhs);
+        Self { amount: self.amount + rhs.amount, precision: self.precision, symbol: self.symbol }
+    }
+}
+
+impl Sub for Asset {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        assert_same_symbol(&self, &rhs);
+        Self { amount: self.amount - rhs.amount, precision: self.precision, symbol: self.symbol }
+    }
+}
+
+impl AddAssign for Asset {
+    fn add_assign(&mut self, rhs: Self) {
+        assert_same_symbol(self, &rhs);
+        self.amount += rhs.amount;
+    }
+}
+
+impl SubAssign for Asset {
+    fn sub_assign(&mut self, rhs: Self) {
+        assert_same_symbol(self, &rhs);
+        self.amount -= rhs.amount;
+    }
+}
+
+impl Mul<i64> for Asset {
+    type Output = Self;
+    fn mul(self, rhs: i64) -> Self {
+        Self { amount: self.amount * rhs, precision: self.precision, symbol: self.symbol }
+    }
+}
+
+impl Mul<f64> for Asset {
+    type Output = Self;
+    fn mul(self, rhs: f64) -> Self {
+        Self { amount: (self.amount as f64 * rhs).round() as i64, precision: self.precision, symbol: self.symbol }
+    }
+}
+
+impl Div<i64> for Asset {
+    type Output = Self;
+    fn div(self, rhs: i64) -> Self {
+        Self { amount: self.amount / rhs, precision: self.precision, symbol: self.symbol }
+    }
+}
+
+impl Div<f64> for Asset {
+    type Output = Self;
+    fn div(self, rhs: f64) -> Self {
+        Self { amount: (self.amount as f64 / rhs).round() as i64, precision: self.precision, symbol: self.symbol }
     }
 }
 
@@ -293,6 +394,65 @@ mod tests {
         let deserialized: Asset =
             serde_json::from_value(serialized).expect("asset should deserialize");
         assert_eq!(deserialized, input);
+    }
+
+    #[test]
+    fn as_f64_converts_correctly() {
+        let asset = Asset::hive(1.5);
+        assert!((asset.as_f64() - 1.5).abs() < 1e-10);
+        let vests = Asset::vests(123456.789);
+        assert!((vests.as_f64() - 123456.789).abs() < 1e-6);
+    }
+
+    #[test]
+    fn add_sub_same_symbol() {
+        let a = Asset::hive(1.0);
+        let b = Asset::hive(2.5);
+        let sum = a.clone() + b.clone();
+        assert_eq!(sum.to_string(), "3.500 HIVE");
+        let diff = b - a;
+        assert_eq!(diff.to_string(), "1.500 HIVE");
+    }
+
+    #[test]
+    fn add_assign_sub_assign() {
+        let mut a = Asset::hive(5.0);
+        a += Asset::hive(3.0);
+        assert_eq!(a.to_string(), "8.000 HIVE");
+        a -= Asset::hive(2.0);
+        assert_eq!(a.to_string(), "6.000 HIVE");
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot operate on assets with different symbols")]
+    fn add_different_symbols_panics() {
+        let _ = Asset::hive(1.0) + Asset::hbd(1.0);
+    }
+
+    #[test]
+    fn mul_div_scalars() {
+        let a = Asset::hive(2.0);
+        assert_eq!((a.clone() * 3_i64).to_string(), "6.000 HIVE");
+        assert_eq!((a.clone() * 1.5_f64).to_string(), "3.000 HIVE");
+        assert_eq!((a.clone() / 2_i64).to_string(), "1.000 HIVE");
+        assert_eq!((a / 4.0_f64).to_string(), "0.500 HIVE");
+    }
+
+    #[test]
+    fn min_max_same_symbol() {
+        let a = Asset::hive(1.0);
+        let b = Asset::hive(2.0);
+        assert_eq!(Asset::min(&a, &b), a);
+        assert_eq!(Asset::max(&a, &b), b);
+    }
+
+    #[test]
+    fn partial_ord_same_symbol() {
+        let a = Asset::hive(1.0);
+        let b = Asset::hive(2.0);
+        assert!(a < b);
+        assert!(b > a);
+        assert_eq!(a.partial_cmp(&Asset::hbd(1.0)), None);
     }
 
     #[test]

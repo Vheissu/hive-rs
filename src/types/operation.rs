@@ -61,10 +61,11 @@ pub enum Operation {
     UpdateProposal(UpdateProposalOperation),                           // 47
     CollateralizedConvert(CollateralizedConvertOperation),             // 48
     RecurrentTransfer(RecurrentTransferOperation),                     // 49
+    Virtual { op_type: String, body: Value },
 }
 
 impl Operation {
-    pub fn name(&self) -> &'static str {
+    pub fn op_name(&self) -> &str {
         match self {
             Self::Vote(_) => "vote",
             Self::Comment(_) => "comment",
@@ -116,7 +117,16 @@ impl Operation {
             Self::UpdateProposal(_) => "update_proposal",
             Self::CollateralizedConvert(_) => "collateralized_convert",
             Self::RecurrentTransfer(_) => "recurrent_transfer",
+            Self::Virtual { op_type, .. } => op_type.as_str(),
         }
+    }
+
+    pub fn name(&self) -> &str {
+        self.op_name()
+    }
+
+    pub fn is_virtual(&self) -> bool {
+        matches!(self, Self::Virtual { .. })
     }
 
     pub fn id(&self) -> u8 {
@@ -171,6 +181,7 @@ impl Operation {
             Self::UpdateProposal(_) => 47,
             Self::CollateralizedConvert(_) => 48,
             Self::RecurrentTransfer(_) => 49,
+            Self::Virtual { .. } => 255,
         }
     }
 }
@@ -233,6 +244,7 @@ impl Serialize for Operation {
             Self::UpdateProposal(op) => seq.serialize_element(op)?,
             Self::CollateralizedConvert(op) => seq.serialize_element(op)?,
             Self::RecurrentTransfer(op) => seq.serialize_element(op)?,
+            Self::Virtual { body, .. } => seq.serialize_element(body)?,
         }
         seq.end()
     }
@@ -350,9 +362,10 @@ impl<'de> Deserialize<'de> for Operation {
                 parse_variant!(CollateralizedConvert, CollateralizedConvertOperation)
             }
             "recurrent_transfer" => parse_variant!(RecurrentTransfer, RecurrentTransferOperation),
-            _ => Err(D::Error::custom(format!(
-                "unsupported operation type '{op_name}'"
-            ))),
+            _ => Ok(Self::Virtual {
+                op_type: op_name.to_string(),
+                body: op_value,
+            }),
         }
     }
 }
@@ -411,6 +424,51 @@ pub enum OperationName {
     UpdateProposal = 47,
     CollateralizedConvert = 48,
     RecurrentTransfer = 49,
+
+    // Virtual operations
+    FillConvertRequest = 50,
+    AuthorReward = 51,
+    CurationReward = 52,
+    CommentReward = 53,
+    LiquidityReward = 54,
+    Interest = 55,
+    FillVestingWithdraw = 56,
+    FillOrder = 57,
+    ShutdownWitness = 58,
+    FillTransferFromSavings = 59,
+    Hardfork = 60,
+    CommentPayoutUpdate = 61,
+    ReturnVestingDelegation = 62,
+    CommentBenefactorReward = 63,
+    ProducerReward = 64,
+    ClearNullAccountBalance = 65,
+    ProposalPay = 66,
+    DhfFunding = 67,
+    HardforkHive = 68,
+    HardforkHiveRestore = 69,
+    DelayedVoting = 70,
+    ConsolidateTreasuryBalance = 71,
+    EffectiveCommentVote = 72,
+    IneffectiveDeleteComment = 73,
+    DhfConversion = 74,
+    ExpiredAccountNotification = 75,
+    ChangedRecoveryAccount = 76,
+    TransferToVestingCompleted = 77,
+    PowReward = 78,
+    VestingSharesSplit = 79,
+    AccountCreated = 80,
+    FillCollateralizedConvertRequest = 81,
+    SystemWarning = 82,
+    FillRecurrentTransfer = 83,
+    FailedRecurrentTransfer = 84,
+    LimitOrderCancelled = 85,
+    ProducerMissedBlock = 86,
+    ProposalFee = 87,
+    CollateralizedConvertImmediateConversion = 88,
+    EscrowApproved = 89,
+    EscrowRejected = 90,
+    ProxyCleared = 91,
+    DeclinedVotingRights = 92,
 }
 
 impl OperationName {
@@ -923,6 +981,30 @@ mod tests {
             }
             _ => panic!("expected transfer operation"),
         }
+    }
+
+    #[test]
+    fn unknown_operation_deserializes_as_virtual() {
+        let op: Operation = serde_json::from_value(json!([
+            "author_reward",
+            {
+                "author": "alice",
+                "permlink": "test-post",
+                "hbd_payout": "1.000 HBD",
+                "hive_payout": "0.000 HIVE",
+                "vesting_payout": "100.000000 VESTS"
+            }
+        ]))
+        .expect("virtual op should deserialize");
+
+        assert!(op.is_virtual());
+        assert_eq!(op.name(), "author_reward");
+        assert_eq!(op.id(), 255);
+
+        // Round-trip serialization
+        let serialized = serde_json::to_value(&op).expect("virtual op should serialize");
+        assert_eq!(serialized[0], "author_reward");
+        assert_eq!(serialized[1]["author"], "alice");
     }
 
     #[test]
