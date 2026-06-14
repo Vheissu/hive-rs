@@ -27,6 +27,10 @@ impl AssetSymbol {
     }
 }
 
+/// The largest decimal precision an `Asset` can hold. Above this an i64 amount
+/// can no longer represent the value (10^19 overflows i64).
+pub const MAX_PRECISION: u8 = 18;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Asset {
     pub amount: i64,
@@ -101,8 +105,34 @@ impl Asset {
     }
 
     pub fn as_f64(&self) -> f64 {
-        let scale = 10_i64.pow(self.precision as u32);
-        self.amount as f64 / scale as f64
+        // Use floating-point exponentiation so a (mis-constructed) precision
+        // above `MAX_PRECISION` cannot overflow and panic an integer `pow`.
+        let scale = 10_f64.powi(self.precision as i32);
+        self.amount as f64 / scale
+    }
+
+    /// Adds two assets of the same symbol, returning `None` on overflow.
+    pub fn checked_add(&self, rhs: &Self) -> Option<Self> {
+        if self.symbol != rhs.symbol || self.precision != rhs.precision {
+            return None;
+        }
+        Some(Self {
+            amount: self.amount.checked_add(rhs.amount)?,
+            precision: self.precision,
+            symbol: self.symbol.clone(),
+        })
+    }
+
+    /// Subtracts two assets of the same symbol, returning `None` on overflow.
+    pub fn checked_sub(&self, rhs: &Self) -> Option<Self> {
+        if self.symbol != rhs.symbol || self.precision != rhs.precision {
+            return None;
+        }
+        Some(Self {
+            amount: self.amount.checked_sub(rhs.amount)?,
+            precision: self.precision,
+            symbol: self.symbol.clone(),
+        })
     }
 
     pub fn min(a: &Self, b: &Self) -> Self {
@@ -212,11 +242,13 @@ impl Div<f64> for Asset {
 
 impl Display for Asset {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let scale = 10_i64.pow(self.precision as u32);
+        // Saturate rather than panic if a value was hand-constructed with a
+        // precision beyond what an i64 amount can represent.
+        let scale = 10_u64.checked_pow(self.precision as u32).unwrap_or(u64::MAX);
         let sign = if self.amount < 0 { "-" } else { "" };
         let abs = self.amount.unsigned_abs();
-        let whole = abs / scale as u64;
-        let fraction = abs % scale as u64;
+        let whole = abs / scale;
+        let fraction = abs % scale;
 
         if self.precision == 0 {
             write!(f, "{sign}{whole} {}", self.symbol.as_str())
@@ -278,6 +310,13 @@ fn parse_precision(amount: &str) -> Result<u8> {
         Some((_, fractional)) => fractional.len(),
         None => 0,
     };
+    // 10^19 overflows i64, so any precision above 18 cannot be represented by an
+    // i64 amount and would also panic the i64-based `Display`/`as_f64` paths.
+    if precision > MAX_PRECISION as usize {
+        return Err(HiveError::InvalidAsset(format!(
+            "precision {precision} exceeds maximum of {MAX_PRECISION}"
+        )));
+    }
     u8::try_from(precision).map_err(|_| HiveError::InvalidAsset("invalid precision".to_string()))
 }
 
@@ -412,6 +451,41 @@ mod tests {
         assert_eq!(sum.to_string(), "3.500 HIVE");
         let diff = b - a;
         assert_eq!(diff.to_string(), "1.500 HIVE");
+    }
+
+    #[test]
+    fn checked_add_sub_report_overflow() {
+        let a = Asset {
+            amount: i64::MAX,
+            precision: 3,
+            symbol: AssetSymbol::Hive,
+        };
+        let one = Asset::from_string("0.001 HIVE").expect("asset should parse");
+        assert!(a.checked_add(&one).is_none());
+        assert!(a.checked_sub(&Asset::hbd(1.0)).is_none());
+
+        let sum = Asset::hive(1.0)
+            .checked_add(&Asset::hive(2.0))
+            .expect("addition should succeed");
+        assert_eq!(sum.to_string(), "3.000 HIVE");
+    }
+
+    #[test]
+    fn rejects_precision_above_maximum() {
+        let too_precise = format!("0.{} FOO", "0".repeat(19));
+        assert!(Asset::from_string(&too_precise).is_err());
+    }
+
+    #[test]
+    fn display_does_not_panic_on_extreme_precision() {
+        // Hand-constructed with a precision an i64 amount cannot represent.
+        let asset = Asset {
+            amount: 1,
+            precision: 30,
+            symbol: AssetSymbol::Custom("FOO".to_string()),
+        };
+        let _ = asset.to_string();
+        let _ = asset.as_f64();
     }
 
     #[test]

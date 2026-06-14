@@ -116,7 +116,12 @@ impl FailoverTransport {
                     }
                     let delay = self.backoff_delay(node_failures);
                     drop(state);
-                    tokio::time::sleep(delay).await;
+
+                    // Only back off if another node is still going to be tried;
+                    // sleeping after the final attempt just delays the error.
+                    if offset + 1 < self.transports.len() {
+                        tokio::time::sleep(delay).await;
+                    }
                 }
             }
         }

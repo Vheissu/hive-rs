@@ -41,7 +41,7 @@ pub struct PublicKey {
 
 impl PublicKey {
     pub fn from_string(value: &str) -> Result<Self> {
-        if value.len() < 3 {
+        if value.len() < 3 || !value.is_char_boundary(3) {
             return Err(HiveError::InvalidKey(
                 "public key must include a 3-byte prefix".to_string(),
             ));

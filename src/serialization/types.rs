@@ -207,6 +207,14 @@ pub fn read_varint32(cursor: &mut &[u8]) -> Result<u32> {
 
     while index < cursor.len() {
         let byte = cursor[index];
+        // The fifth byte (shift == 28) may only contribute the top four bits of
+        // a u32. Any higher bits, or a continuation flag, would overflow u32 and
+        // must be rejected rather than silently truncated.
+        if shift == 28 && byte & 0xF0 != 0 {
+            return Err(HiveError::Serialization(
+                "varint32 value is too large".to_string(),
+            ));
+        }
         value |= ((byte & 0x7F) as u32) << shift;
         index += 1;
         if byte & 0x80 == 0 {
@@ -249,7 +257,17 @@ mod tests {
 
     #[test]
     fn varint_round_trip() {
-        let values = [0_u32, 1, 127, 128, 255, 300, u16::MAX as u32, 1_000_000];
+        let values = [
+            0_u32,
+            1,
+            127,
+            128,
+            255,
+            300,
+            u16::MAX as u32,
+            1_000_000,
+            u32::MAX,
+        ];
         for value in values {
             let mut buf = Vec::new();
             write_varint32(&mut buf, value);
@@ -258,6 +276,19 @@ mod tests {
             assert_eq!(decoded, value);
             assert!(slice.is_empty());
         }
+    }
+
+    #[test]
+    fn varint_rejects_overflowing_values() {
+        // Encodes 2^32, which does not fit in a u32 and must not be truncated.
+        let overflow = [0x80_u8, 0x80, 0x80, 0x80, 0x10];
+        let mut slice = overflow.as_slice();
+        assert!(read_varint32(&mut slice).is_err());
+
+        // A sixth continuation byte (bits 32+) is likewise out of range.
+        let too_long = [0xFF_u8, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+        let mut slice = too_long.as_slice();
+        assert!(read_varint32(&mut slice).is_err());
     }
 
     #[test]
