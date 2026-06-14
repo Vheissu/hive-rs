@@ -143,9 +143,16 @@ where
 
 pub fn write_authority(buf: &mut Vec<u8>, authority: &Authority) -> Result<()> {
     write_u32(buf, authority.weight_threshold);
+
+    // `account_auths` is a `flat_map<account_name_type, weight>`. The chain stores
+    // and signs it sorted by account name (ascending), so we must canonicalize the
+    // order here or the signature will be computed over a non-canonical payload and
+    // rejected. Account names are ASCII, so byte ordering matches the chain's.
+    let mut account_auths = authority.account_auths.clone();
+    account_auths.sort_by(|a, b| a.0.cmp(&b.0));
     write_flat_map(
         buf,
-        &authority.account_auths,
+        &account_auths,
         |b, account| {
             write_string(b, account);
             Ok(())
@@ -155,10 +162,23 @@ pub fn write_authority(buf: &mut Vec<u8>, authority: &Authority) -> Result<()> {
             Ok(())
         },
     )?;
+
+    // `key_auths` is a `flat_map<public_key_type, weight>`. `public_key_type` sorts
+    // by its 33-byte compressed representation, NOT by the base58 string, so parse
+    // each key and order by the raw bytes before writing.
+    let mut key_auths = authority
+        .key_auths
+        .iter()
+        .map(|(key, weight)| Ok((PublicKey::from_string(key)?.compressed_bytes(), *weight)))
+        .collect::<Result<Vec<_>>>()?;
+    key_auths.sort_by(|a, b| a.0.cmp(&b.0));
     write_flat_map(
         buf,
-        &authority.key_auths,
-        |b, key| write_public_key(b, key),
+        &key_auths,
+        |b, key_bytes| {
+            b.extend_from_slice(key_bytes);
+            Ok(())
+        },
         |b, weight| {
             write_u16(b, *weight);
             Ok(())

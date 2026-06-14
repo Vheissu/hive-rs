@@ -129,6 +129,17 @@ pub fn generate_trx_id(transaction: &Transaction) -> Result<String> {
     Ok(hex::encode(hash)[..40].to_string())
 }
 
+/// Writes a `flat_set<account_name_type>` in the chain's canonical (sorted,
+/// ascending) order. Account names are ASCII so byte ordering matches the chain.
+fn write_account_flat_set(buf: &mut Vec<u8>, accounts: &[String]) -> Result<()> {
+    let mut sorted = accounts.to_vec();
+    sorted.sort();
+    write_array(buf, &sorted, |b, account| {
+        write_string(b, account);
+        Ok(())
+    })
+}
+
 fn write_void_extensions(buf: &mut Vec<u8>, extensions: &[()]) -> Result<()> {
     if !extensions.is_empty() {
         return Err(HiveError::Serialization(
@@ -287,10 +298,7 @@ fn serialize_pow(_buf: &mut Vec<u8>, _op: &PowOperation) -> Result<()> {
 }
 
 fn serialize_custom(buf: &mut Vec<u8>, op: &CustomOperation) -> Result<()> {
-    write_array(buf, &op.required_auths, |b, auth| {
-        write_string(b, auth);
-        Ok(())
-    })?;
+    write_account_flat_set(buf, &op.required_auths)?;
     write_u16(buf, op.id);
     write_variable_binary(buf, &op.data);
     Ok(())
@@ -313,14 +321,8 @@ fn serialize_delete_comment(buf: &mut Vec<u8>, op: &DeleteCommentOperation) -> R
 }
 
 fn serialize_custom_json(buf: &mut Vec<u8>, op: &CustomJsonOperation) -> Result<()> {
-    write_array(buf, &op.required_auths, |b, auth| {
-        write_string(b, auth);
-        Ok(())
-    })?;
-    write_array(buf, &op.required_posting_auths, |b, auth| {
-        write_string(b, auth);
-        Ok(())
-    })?;
+    write_account_flat_set(buf, &op.required_auths)?;
+    write_account_flat_set(buf, &op.required_posting_auths)?;
     write_string(buf, &op.id);
     write_string(buf, &op.json);
     Ok(())
@@ -336,7 +338,11 @@ fn serialize_comment_options(buf: &mut Vec<u8>, op: &CommentOptionsOperation) ->
     write_array(buf, &op.extensions, |b, ext| match ext {
         CommentOptionsExtension::Beneficiaries { beneficiaries } => {
             write_varint32(b, 0);
-            write_array(b, beneficiaries, |bb, route| {
+            // `beneficiaries` is a `flat_set<beneficiary_route_type>` sorted by
+            // account name; canonicalize so the signed payload matches the chain's.
+            let mut routes = beneficiaries.clone();
+            routes.sort_by(|a, b| a.account.cmp(&b.account));
+            write_array(b, &routes, |bb, route| {
                 write_string(bb, &route.account);
                 write_u16(bb, route.weight);
                 Ok(())
@@ -492,18 +498,9 @@ fn serialize_cancel_transfer_from_savings(
 }
 
 fn serialize_custom_binary(buf: &mut Vec<u8>, op: &CustomBinaryOperation) -> Result<()> {
-    write_array(buf, &op.required_owner_auths, |b, value| {
-        write_string(b, value);
-        Ok(())
-    })?;
-    write_array(buf, &op.required_active_auths, |b, value| {
-        write_string(b, value);
-        Ok(())
-    })?;
-    write_array(buf, &op.required_posting_auths, |b, value| {
-        write_string(b, value);
-        Ok(())
-    })?;
+    write_account_flat_set(buf, &op.required_owner_auths)?;
+    write_account_flat_set(buf, &op.required_active_auths)?;
+    write_account_flat_set(buf, &op.required_posting_auths)?;
     write_array(buf, &op.required_auths, write_authority)?;
     write_string(buf, &op.id);
     write_variable_binary(buf, &op.data);
@@ -717,6 +714,65 @@ mod tests {
         assert_eq!(
             hex::encode(bytes),
             "d204f776e54207486a59010003666f6f036261720362617a1027010a6c6f6e672d70616e7473"
+        );
+    }
+
+    #[test]
+    fn custom_json_required_auths_are_sorted_canonically() {
+        use crate::types::CustomJsonOperation;
+
+        let make = |auths: Vec<&str>| {
+            let op = Operation::CustomJson(CustomJsonOperation {
+                required_auths: Vec::new(),
+                required_posting_auths: auths.into_iter().map(str::to_string).collect(),
+                id: "follow".to_string(),
+                json: "{}".to_string(),
+            });
+            let mut buf = Vec::new();
+            op.hive_serialize(&mut buf).expect("should serialize");
+            buf
+        };
+
+        // Input order must not affect the signed bytes: the chain sorts the flat_set.
+        assert_eq!(make(vec!["bob", "alice"]), make(vec!["alice", "bob"]));
+    }
+
+    #[test]
+    fn authority_key_auths_sort_by_compressed_bytes() {
+        use crate::crypto::keys::PrivateKey;
+        use crate::types::{AccountUpdateOperation, Authority};
+
+        let key_a = PrivateKey::from_seed("alpha-key")
+            .expect("key")
+            .public_key()
+            .to_string();
+        let key_b = PrivateKey::from_seed("beta-key")
+            .expect("key")
+            .public_key()
+            .to_string();
+
+        let make = |order: Vec<(String, u16)>| {
+            let op = Operation::AccountUpdate(AccountUpdateOperation {
+                account: "alice".to_string(),
+                owner: None,
+                active: Some(Authority {
+                    weight_threshold: 1,
+                    account_auths: vec![("zeb".to_string(), 1), ("abe".to_string(), 1)],
+                    key_auths: order,
+                }),
+                posting: None,
+                memo_key: key_a.clone(),
+                json_metadata: String::new(),
+            });
+            let mut buf = Vec::new();
+            op.hive_serialize(&mut buf).expect("should serialize");
+            buf
+        };
+
+        // Both account_auths and key_auths must be order-independent in the output.
+        assert_eq!(
+            make(vec![(key_a.clone(), 1), (key_b.clone(), 1)]),
+            make(vec![(key_b.clone(), 1), (key_a.clone(), 1)])
         );
     }
 
